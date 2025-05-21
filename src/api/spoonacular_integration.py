@@ -8,6 +8,7 @@ load_dotenv()
 
 SPOONACULAR_KEY = os.getenv("SPOONACULAR_API_KEY")
 
+
 def fetch_recipes_by_ingredients(ingredients, num_recipes=5):
     """Fetch recipes from Spoonacular API and format as LangChain Documents"""
     url = "https://api.spoonacular.com/recipes/findByIngredients"
@@ -17,10 +18,16 @@ def fetch_recipes_by_ingredients(ingredients, num_recipes=5):
         "apiKey": SPOONACULAR_KEY,
         "instructionsRequired": True
     }
-    
+
     response = requests.get(url, params=params)
-    recipes = response.json()
-    
+    try:
+        response.raise_for_status()
+        recipes = response.json()
+    except Exception as e:
+        print(f"Error fetching recipes: {e}")
+        print(f"Response content: {response.text}")
+        return []  # Return empty list on error
+
     docs = []
     for recipe in recipes:
         content = f"""
@@ -28,6 +35,7 @@ def fetch_recipes_by_ingredients(ingredients, num_recipes=5):
         Ingredients: {json.dumps([ing['name'] for ing in recipe['usedIngredients']])}
         Instructions: {recipe.get('instructions', 'No instructions provided')}
         """
-        docs.append(Document(page_content=content, metadata={"id": recipe["id"]}))
-    
+        docs.append(Document(page_content=content,
+                    metadata={"id": recipe["id"]}))
+
     return docs
