@@ -9,7 +9,7 @@ load_dotenv()
 SPOONACULAR_KEY = os.getenv("SPOONACULAR_API_KEY")
 
 
-def fetch_recipes_by_ingredients(ingredients, num_recipes=5):
+def fetch_recipes_by_ingredients(ingredients, num_recipes=10):
     """Fetch recipes from Spoonacular API and format as LangChain Documents"""
     url = "https://api.spoonacular.com/recipes/findByIngredients"
     params = {
