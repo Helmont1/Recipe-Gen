@@ -26,16 +26,45 @@ def fetch_recipes_by_ingredients(ingredients, num_recipes=10):
     except Exception as e:
         print(f"Error fetching recipes: {e}")
         print(f"Response content: {response.text}")
-        return []  # Return empty list on error
+        return []
 
     docs = []
     for recipe in recipes:
+        # Extract all ingredients (used + missed)
+        all_ingredients = []
+
+        # Used ingredients (ingredients from user input)
+        used_ingredients = [ing['name'].lower()
+                            for ing in recipe.get('usedIngredients', [])]
+        all_ingredients.extend(used_ingredients)
+
+        # Missed ingredients (additional ingredients in the recipe)
+        missed_ingredients = [ing['name'].lower()
+                              for ing in recipe.get('missedIngredients', [])]
+        all_ingredients.extend(missed_ingredients)
+
         content = f"""
         Recipe Name: {recipe['title']}
-        Ingredients: {json.dumps([ing['name'] for ing in recipe['usedIngredients']])}
+        Ingredients: {json.dumps([ing['name'] for ing in recipe.get('usedIngredients', [])])}
         Instructions: {recipe.get('instructions', 'No instructions provided')}
         """
-        docs.append(Document(page_content=content,
-                    metadata={"id": recipe["id"]}))
+
+        # Enhanced metadata with ingredients for filtering
+        metadata = {
+            "id": recipe.get("id"),
+            "title": recipe.get("title", ""),
+            "ingredients": all_ingredients,  # List of ingredient names
+            "used_ingredients": used_ingredients,  # User provided ingredients
+            "missed_ingredients": missed_ingredients,  # Additional ingredients needed
+            "ingredient_count": len(all_ingredients)
+        }
+
+        # Debug: Print metadata to see what's being stored
+        print(f"DEBUG: Recipe '{recipe.get('title', 'Unknown')}' metadata:")
+        print(f"  - ingredients: {all_ingredients}")
+        print(f"  - used_ingredients: {used_ingredients}")
+        print(f"  - missed_ingredients: {missed_ingredients}")
+
+        docs.append(Document(page_content=content, metadata=metadata))
 
     return docs
