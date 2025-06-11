@@ -34,6 +34,58 @@ def initialize_session_state():
         st.session_state.generated_recipes = []
     if 'ingredients_cache' not in st.session_state:
         st.session_state.ingredients_cache = None
+    if 'app_logs' not in st.session_state:
+        st.session_state.app_logs = []
+
+
+class AppLogger:
+    """Logger class to collect app messages for modal display"""
+
+    @staticmethod
+    def clear_logs():
+        """Clear all logs"""
+        st.session_state.app_logs = []
+
+    @staticmethod
+    def log_info(message):
+        """Add info message to logs"""
+        st.session_state.app_logs.append({"type": "info", "message": message})
+
+    @staticmethod
+    def log_success(message):
+        """Add success message to logs"""
+        st.session_state.app_logs.append(
+            {"type": "success", "message": message})
+
+    @staticmethod
+    def log_warning(message):
+        """Add warning message to logs"""
+        st.session_state.app_logs.append(
+            {"type": "warning", "message": message})
+
+    @staticmethod
+    def log_error(message):
+        """Add error message to logs"""
+        st.session_state.app_logs.append({"type": "error", "message": message})
+
+    @staticmethod
+    def display_logs_modal():
+        """Display logs in an expandable modal"""
+        if st.session_state.app_logs:
+            # Create expandable section for logs
+            with st.expander(f"📋 Logs ({len(st.session_state.app_logs)} mensagens)", expanded=False):
+                for i, log in enumerate(st.session_state.app_logs):
+                    if log["type"] == "info":
+                        st.info(f"{i+1}. {log['message']}")
+                    elif log["type"] == "success":
+                        st.success(f"{i+1}. {log['message']}")
+                    elif log["type"] == "warning":
+                        st.warning(f"{i+1}. {log['message']}")
+                    elif log["type"] == "error":
+                        st.error(f"{i+1}. {log['message']}")
+        else:
+            with st.expander("📋 Logs (0 mensagens)", expanded=False):
+                st.info("Nenhum log disponível ainda.")
 
 
 def filter_user_ingredients_by_recipes(user_ingredients, retrieved_docs):
@@ -82,19 +134,55 @@ def should_reset_cache(current_query):
     if st.session_state.ingredients_cache != current_query:
         st.session_state.generated_recipes = []
         st.session_state.ingredients_cache = current_query
+        AppLogger.clear_logs()  # Clear logs for new search
         return True
     return False
 
 
 def fetch_recipes_with_ingredient_filter(ingredients_list, config):
-    """Fetch recipes using Qdrant with ingredient filtering and Spoonacular fallback"""
+    """Fetch recipes using Spoonacular first, then fall back to Qdrant cache"""
 
     query = ", ".join(ingredients_list)
 
-    # Try to retrieve from Qdrant with ingredient filter
+    # First, try to get fresh results from Spoonacular for the complete ingredient list
+    AppLogger.log_info("Buscando receitas no Spoonacular...")
+
     try:
-        st.info("Buscando receitas no cache local...")
-        print(f"DEBUG: Searching for ingredients: {ingredients_list}")
+        print(
+            f"DEBUG: Searching Spoonacular for ingredients: {ingredients_list}")
+        recipe_docs = fetch_recipes_by_ingredients(ingredients_list)
+
+        if recipe_docs:
+            AppLogger.log_success(
+                f"{len(recipe_docs)} receitas encontradas no Spoonacular!")
+
+            # Show debug info about Spoonacular results
+            for i, doc in enumerate(recipe_docs[:2]):
+                print(f"DEBUG: Spoonacular doc {i} metadata: {doc.metadata}")
+
+            # Store in Qdrant for future use (this will also create the index)
+            AppLogger.log_info(
+                "Armazenando receitas no Qdrant para futuras buscas...")
+            store_recipes(recipe_docs, config['embedder'], config['qdrant_url'],
+                          config['qdrant_api_key'], config['collection_name'])
+
+            AppLogger.log_success("Receitas armazenadas com sucesso!")
+            return recipe_docs
+
+        else:
+            AppLogger.log_warning(
+                "Nenhuma receita encontrada no Spoonacular com todos os ingredientes.")
+            AppLogger.log_info(
+                "Buscando receitas similares no Qdrant...")
+
+    except Exception as e:
+        AppLogger.log_warning(f"Erro ao buscar no Spoonacular: {str(e)}")
+        print(f"DEBUG: Exception in Spoonacular search: {e}")
+        AppLogger.log_info("Tentando buscar no Qdrant...")
+
+    # If Spoonacular fails or returns no results, try to retrieve from Qdrant cache
+    try:
+        print(f"DEBUG: Searching Qdrant for ingredients: {ingredients_list}")
 
         # First try with ingredient filtering
         retrieved_docs = retrieve_recipes_by_ingredients(
@@ -105,7 +193,27 @@ def fetch_recipes_with_ingredient_filter(ingredients_list, config):
         print(
             f"DEBUG: Found {len(retrieved_docs) if retrieved_docs else 0} docs with ingredient filter")
 
-        # If no results with filter, try regular similarity search
+        # Check if the cached recipes actually contain all requested ingredients
+        if retrieved_docs:
+            # Verify that we have recipes that use all the requested ingredients
+            valid_recipes = []
+            for doc in retrieved_docs:
+                used_ingredients = [
+                    ing.lower() for ing in doc.metadata.get('used_ingredients', [])]
+                # Check if all user ingredients are found in this recipe's used ingredients
+                if all(any(user_ing.lower() in recipe_ing for recipe_ing in used_ingredients)
+                       for user_ing in ingredients_list):
+                    valid_recipes.append(doc)
+
+            if valid_recipes:
+                AppLogger.log_success(
+                    f"{len(valid_recipes)} receitas encontradas no cache local que usam todos os ingredientes!")
+                return valid_recipes
+            else:
+                AppLogger.log_info(
+                    "Receitas no cache não contêm todos os ingredientes solicitados.")
+
+        # If no results with filter, try regular similarity search as last resort
         if not retrieved_docs:
             print("DEBUG: No results with filter, trying similarity search")
             retrieved_docs = retrieve_similar_recipes(
@@ -116,109 +224,18 @@ def fetch_recipes_with_ingredient_filter(ingredients_list, config):
                 f"DEBUG: Similarity search returned {len(retrieved_docs) if retrieved_docs else 0} docs")
 
         if retrieved_docs:
-            st.success(
-                f"{len(retrieved_docs)} receitas encontradas no cache local!")
-            # Show some debug info about what was found
-            for i, doc in enumerate(retrieved_docs[:2]):
-                print(f"DEBUG: Doc {i} metadata: {doc.metadata}")
+            AppLogger.log_info(
+                f"{len(retrieved_docs)} receitas similares encontradas no Qdrant.")
+            AppLogger.log_warning(
+                "Nota: Algumas receitas podem não usar todos os ingredientes solicitados.")
             return retrieved_docs
         else:
-            st.info("Nenhuma receita encontrada no cache local.")
-
-    except Exception as e:
-        st.warning(f"Erro ao buscar no Qdrant: {str(e)}")
-        print(f"DEBUG: Exception in cache search: {e}")
-        st.info("Tentando busca alternativa...")
-        retrieved_docs = []
-
-    # If no docs found, fetch from Spoonacular and store
-    st.info("Buscando novas receitas no Spoonacular...")
-
-    try:
-        recipe_docs = fetch_recipes_by_ingredients(ingredients_list)
-
-        if not recipe_docs:
-            st.error(
-                "Nenhuma receita encontrada com esses ingredientes na API do Spoonacular.")
-            return None
-
-        st.info(
-            f"{len(recipe_docs)} receitas encontradas no Spoonacular. Armazenando no cache...")
-
-        # Show debug info about Spoonacular results
-        for i, doc in enumerate(recipe_docs[:2]):
-            print(f"DEBUG: Spoonacular doc {i} metadata: {doc.metadata}")
-
-        # Store in Qdrant for future use (this will also create the index)
-        store_recipes(recipe_docs, config['embedder'], config['qdrant_url'],
-                      config['qdrant_api_key'], config['collection_name'])
-
-        st.success(
-            "Receitas armazenadas com sucesso! Preparando índices para futuras buscas...")
-
-        retrieved_docs = retrieve_recipes_by_ingredients(
-            ingredients_list, config['embedder'], config['qdrant_url'],
-            config['qdrant_api_key'], config['collection_name'], k=5
-        )
-
-        if not retrieved_docs:
-            query = ", ".join(ingredients_list)
-            retrieved_docs = retrieve_similar_recipes(
-                query, config['embedder'], config['qdrant_url'],
-                config['qdrant_api_key'], config['collection_name'], k=5
-            )
-
-        if retrieved_docs:
-            st.success(
-                f"{len(retrieved_docs)} receitas processadas com sucesso!")
-            return retrieved_docs
-        else:
-            st.error("Não foi possível processar as receitas.")
+            AppLogger.log_error("Nenhuma receita encontrada no Qdrant.")
             return None
 
     except Exception as e:
-        st.error(f"Erro ao buscar receitas no Spoonacular: {str(e)}")
-        print(f"DEBUG: Exception in Spoonacular search: {e}")
+        AppLogger.log_error(f"Erro ao buscar no Qdrant: {str(e)}")
         return None
-
-
-# def display_recipe_stats(retrieved_docs, user_ingredients):
-#     """Display statistics about retrieved recipes"""
-#     if not retrieved_docs:
-#         return
-
-#     st.subheader("Estatísticas das Receitas Encontradas")
-
-#     col1, col2, col3 = st.columns(3)
-
-#     with col1:
-#         st.metric("Total de Receitas", len(retrieved_docs))
-
-#     with col2:
-#         # Count recipes that use all user ingredients
-#         perfect_matches = 0
-#         for doc in retrieved_docs:
-#             used_ingredients = doc.metadata.get('used_ingredients', [])
-#             if all(ing.lower() in [u.lower() for u in used_ingredients] for ing in user_ingredients):
-#                 perfect_matches += 1
-#         st.metric("Receitas com Todos Ingredientes", perfect_matches)
-
-#     with col3:
-#         # Average ingredient count
-#         avg_ingredients = sum(doc.metadata.get('ingredient_count', 0)
-#                               for doc in retrieved_docs) / len(retrieved_docs)
-#         st.metric("Média de Ingredientes", f"{avg_ingredients:.1f}")
-
-#     # Show some recipe titles
-#     st.write("**Receitas Encontradas:**")
-#     for i, doc in enumerate(retrieved_docs[:5], 1):
-#         title = doc.metadata.get('title', 'Sem título')
-#         used_ings = doc.metadata.get('used_ingredients', [])
-#         st.write(
-#             f"{i}. {title} (usa: {', '.join(used_ings[:3])}{'...' if len(used_ings) > 3 else ''})")
-
-#     if len(retrieved_docs) > 5:
-#         st.write(f"... e mais {len(retrieved_docs) - 5} receitas")
 
 
 def generate_new_recipe(ingredients_list, context, openai_api_key):
@@ -287,8 +304,7 @@ def main():
     config = initialize_environment()
     initialize_session_state()
 
-    st.title("Gerador de Receitas com RAG")
-    st.markdown("*Powered by OpenAI + Qdrant + Spoonacular*")
+    st.title("Gerador de Receitas")
 
     ingredients = st.text_input(
         "Insira os ingredientes em inglês (separados por vírgula):",
@@ -311,32 +327,16 @@ def main():
         if retrieved_docs:
             context = [doc.page_content for doc in retrieved_docs]
 
-            # Filter user ingredients to only include those found in the retrieved recipes
-            # This removes ingredients that Spoonacular couldn't find recipes for
-            valid_ingredients = filter_user_ingredients_by_recipes(
-                ingredients_list, retrieved_docs)
-
-            if not valid_ingredients:
-                st.error(
-                    "Nenhum dos ingredientes fornecidos foi encontrado em receitas. Tente ingredientes diferentes.")
-                st.info(
-                    "Sugestão: Use ingredientes comuns em inglês como 'chicken', 'tomato', 'cheese', 'egg', etc.")
-                return
-
-            # Show which ingredients are valid and which were removed
-            if len(valid_ingredients) < len(ingredients_list):
-                removed_ingredients = [
-                    ing for ing in ingredients_list if ing not in valid_ingredients]
-                st.warning(
-                    f"Ingredientes removidos (não encontrados em receitas): {', '.join(removed_ingredients)}")
-                st.success(
-                    f"Ingredientes válidos que serão usados: {', '.join(valid_ingredients)}")
-            else:
-                st.success(
-                    f"Todos os ingredientes são válidos: {', '.join(valid_ingredients)}")
-
+            # Use all the ingredients since our fetch function now ensures
+            # we only get recipes that can use these ingredients
             render_recipe_interface(
-                valid_ingredients, context, config['openai_api_key'])
+                ingredients_list, context, config['openai_api_key'])
+        else:
+            AppLogger.log_error(
+                "Não foi possível encontrar receitas com os ingredientes fornecidos.")
+            AppLogger.log_info(
+                "Sugestão: Tente ingredientes comuns em inglês como 'chicken', 'tomato', 'cheese', 'egg', etc.")
+        AppLogger.display_logs_modal()
 
 
 if __name__ == "__main__":
